@@ -85,6 +85,9 @@ static const char chunk_error_message[] = "Could not find enough space to create
 #define EA_REPARSE "user.reparse"
 #define EA_REPARSE_HASH 0xfabad1fe
 
+#define EA_CAP "security.capability"
+#define EA_CAP_HASH 0x7c3650b1
+
 using runs_t = map<uint64_t, list<data_alloc>>;
 
 static void space_list_remove(list<space>& space_list, uint64_t offset, uint64_t length) {
@@ -1133,7 +1136,7 @@ static root& add_image_subvol(root& root_root, root& fstree_root) {
         di.transid = 1;
         di.m = 0;
         di.n = sizeof(subvol_name) - 1;
-        di.type = BTRFS_TYPE_DIRECTORY;
+        di.type = btrfs_inode_type::directory;
         memcpy(di.name, subvol_name, sizeof(subvol_name) - 1);
 
         auto hash = calc_crc32c(0xfffffffe, (const uint8_t*)subvol_name, sizeof(subvol_name) - 1);
@@ -1198,7 +1201,7 @@ static void create_image(root& r, ntfs& dev, const runs_t& runs, uint64_t inode,
         di.transid = 1;
         di.m = 0;
         di.n = sizeof(image_filename) - 1;
-        di.type = BTRFS_TYPE_FILE;
+        di.type = btrfs_inode_type::file;
         memcpy(di.name, image_filename, sizeof(image_filename) - 1);
 
         auto hash = calc_crc32c(0xfffffffe, (const uint8_t*)image_filename, sizeof(image_filename) - 1);
@@ -1496,7 +1499,8 @@ static BTRFS_TIME win_time_to_unix(int64_t time) {
     return bt;
 }
 
-static void link_inode(root& r, uint64_t inode, uint64_t dir, const string_view& name, uint8_t type) {
+static void link_inode(root& r, uint64_t inode, uint64_t dir, const string_view& name,
+                       enum btrfs_inode_type type) {
     uint64_t seq;
 
     // add DIR_ITEM and DIR_INDEX
@@ -1804,7 +1808,7 @@ static void set_xattr(root& r, uint64_t inode, const string_view& name, uint32_t
     di.transid = 1;
     di.m = (uint16_t)data.size();
     di.n = (uint16_t)name.size();
-    di.type = BTRFS_TYPE_EA;
+    di.type = btrfs_inode_type::ea;
     memcpy(di.name, name.data(), name.size());
     memcpy(di.name + name.size(), data.data(), data.size());
 
@@ -1911,6 +1915,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
     uint16_t compression_unit = 0;
     uint64_t vdl, wof_vdl;
     vector<string> warnings;
+    map<string, buffer_t> eas;
 
     static const uint32_t sector_size = 0x1000; // FIXME
 
@@ -1920,6 +1925,13 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
         return;
 
     is_dir = f.is_directory();
+
+    auto add_warning = [&]<typename... Args>(const string_view& msg, Args&&... args) {
+        if (filename.empty())
+            filename = f.get_filename();
+
+        warnings.emplace_back(filename + ": " + fmt::format(msg, std::forward<Args>(args)...));
+    };
 
     f.loop_through_atts([&](const ATTRIBUTE_RECORD_HEADER& att, const string_view& res_data, const u16string_view& name) -> bool {
         switch (att.TypeCode) {
@@ -1985,24 +1997,12 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                     // FIXME - check xattr_name not reserved
 
                     if (att.Flags & ATTRIBUTE_FLAG_ENCRYPTED) {
-                        clear_line();
-
-                        if (filename.empty())
-                            filename = f.get_filename();
-
-                        warnings.emplace_back(fmt::format("Skipping encrypted ADS {}:{}", filename, ads_name));
-
+                        add_warning("Skipping encrypted ADS :{}", ads_name);
                         break;
                     }
 
                     if (att.Flags & ATTRIBUTE_FLAG_COMPRESSION_MASK) {
-                        clear_line();
-
-                        if (filename.empty())
-                            filename = f.get_filename();
-
-                        warnings.emplace_back(fmt::format("Skipping compressed ADS {}:{}", filename, ads_name)); // FIXME
-
+                        add_warning("Skipping compressed ADS :{}", ads_name); // FIXME
                         break;
                     }
 
@@ -2016,13 +2016,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                             memcpy(wof_compressed_data.data(), res_data.data(), res_data.length());
                         } else {
                             if (att.Form.Resident.ValueLength > max_xattr_size) {
-                                clear_line();
-
-                                if (filename.empty())
-                                    filename = f.get_filename();
-
-                                warnings.emplace_back(fmt::format("Skipping overly large ADS {}:{} ({} > {})", filename, ads_name, att.Form.Resident.ValueLength, max_xattr_size));
-
+                                add_warning("Skipping overly large ADS :{} ({} > {})", ads_name, att.Form.Resident.ValueLength, max_xattr_size);
                                 break;
                             }
 
@@ -2033,13 +2027,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                         }
                     } else {
                         if (att.Form.Nonresident.FileSize > max_xattr_size && ads_name != "WofCompressedData") {
-                            clear_line();
-
-                            if (filename.empty())
-                                filename = f.get_filename();
-
-                            warnings.emplace_back(fmt::format("Skipping overly large ADS {}:{} ({} > {})", filename, ads_name, att.Form.Nonresident.FileSize, max_xattr_size));
-
+                            add_warning("Skipping overly large ADS :{} ({} > {})", ads_name, att.Form.Nonresident.FileSize, max_xattr_size);
                             break;
                         }
 
@@ -2102,15 +2090,12 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                     auto name2 = convert.to_bytes(fn->FileName, fn->FileName + fn->FileNameLength);
 
                     if (name2.length() > 255) {
-                        if (filename.empty())
-                            filename = f.get_filename();
-
                         // FIXME - make sure no collision with existing file
 
                         name2 = name2.substr(0, 255);
                         fix_truncated_utf8(name2);
 
-                        warnings.emplace_back(fmt::format("{}: Name was too long, truncating to {}.", filename, name2));
+                        add_warning("Name was too long, truncating to {}.", name2);
                     }
 
                     uint64_t parent = fn->Parent.SegmentNumber;
@@ -2158,13 +2143,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
 
                 if (reparse_point.size() < offsetof(REPARSE_DATA_BUFFER, Reserved) ||
                     reparse_point.size() < rpb.ReparseDataLength + offsetof(REPARSE_DATA_BUFFER, GenericReparseBuffer.DataBuffer)) {
-                    clear_line();
-
-                    if (filename.empty())
-                        filename = f.get_filename();
-
-                    warnings.emplace_back(fmt::format("Reparse point buffer of {} was truncated.", filename));
-
+                    add_warning("Reparse point buffer was truncated.");
                     break;
                 }
 
@@ -2176,12 +2155,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                             (len < offsetof(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer) +
                                             rpb.SymbolicLinkReparseBuffer.PrintNameOffset +
                                             rpb.SymbolicLinkReparseBuffer.PrintNameLength)) {
-                            clear_line();
-
-                            if (filename.empty())
-                                filename = f.get_filename();
-
-                            warnings.emplace_back(fmt::format("Symlink reparse point buffer of {} was truncated.", filename));
+                            add_warning("Symlink reparse point buffer was truncated.");
                         } else if (rpb.SymbolicLinkReparseBuffer.Flags & SYMLINK_FLAG_RELATIVE) {
                             symlink = convert.to_bytes(&rpb.SymbolicLinkReparseBuffer.PathBuffer[rpb.SymbolicLinkReparseBuffer.PrintNameOffset / sizeof(char16_t)],
                                                        &rpb.SymbolicLinkReparseBuffer.PathBuffer[(rpb.SymbolicLinkReparseBuffer.PrintNameOffset + rpb.SymbolicLinkReparseBuffer.PrintNameLength) / sizeof(char16_t)]);
@@ -2196,14 +2170,9 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                     break;
 
                     case IO_REPARSE_TAG_LX_SYMLINK:
-                        if (len < offsetof(REPARSE_DATA_BUFFER, LxSymlink.name)) {
-                            clear_line();
-
-                            if (filename.empty())
-                                filename = f.get_filename();
-
-                            warnings.emplace_back(fmt::format("LXSS reparse point buffer of {} was truncated.", filename));
-                        } else {
+                        if (len < offsetof(REPARSE_DATA_BUFFER, LxSymlink.name))
+                            add_warning("LXSS reparse point buffer was truncated.");
+                        else {
                             symlink = string_view(rpb.LxSymlink.name, len - offsetof(REPARSE_DATA_BUFFER, LxSymlink.name));
                             reparse_point.clear();
                         }
@@ -2218,13 +2187,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
 
                 if (att.FormCode == NTFS_ATTRIBUTE_FORM::RESIDENT_FORM) {
                     if (att.Form.Resident.ValueLength > max_sd_size) {
-                        clear_line();
-
-                        if (filename.empty())
-                            filename = f.get_filename();
-
-                        warnings.emplace_back(fmt::format("Skipping overly large SD for {} ({} > {})", filename, att.Form.Resident.ValueLength, max_sd_size));
-
+                        add_warning("Skipping overly large SD ({} > {})", att.Form.Resident.ValueLength, max_sd_size);
                         break;
                     }
 
@@ -2232,13 +2195,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                     memcpy(sd.data(), res_data.data(), res_data.size());
                 } else {
                     if (att.Form.Nonresident.FileSize > max_sd_size) {
-                        clear_line();
-
-                        if (filename.empty())
-                            filename = f.get_filename();
-
-                        warnings.emplace_back(fmt::format("Skipping overly large SD for {} ({} > {})", filename, att.Form.Nonresident.FileSize, max_sd_size));
-
+                        add_warning("Skipping overly large SD ({} > {})", att.Form.Nonresident.FileSize, max_sd_size);
                         break;
                     }
 
@@ -2256,6 +2213,59 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
 
                     sd.resize((size_t)att.Form.Nonresident.FileSize);
                 }
+
+                break;
+            }
+
+            case ntfs_attribute::EA: {
+                buffer_t eabuf;
+                string_view sv;
+
+                if (att.FormCode == NTFS_ATTRIBUTE_FORM::NONRESIDENT_FORM) {
+                    list<mapping> ea_mappings;
+
+                    read_nonresident_mappings(att, ea_mappings, cluster_size, att.Form.Nonresident.ValidDataLength);
+
+                    eabuf.resize((size_t)sector_align(att.Form.Nonresident.FileSize, cluster_size));
+                    memset(eabuf.data(), 0, eabuf.size());
+
+                    for (const auto& m : ea_mappings) {
+                        dev.seek(m.lcn * cluster_size);
+                        dev.read(eabuf.data() + (m.vcn * cluster_size), (size_t)(m.length * cluster_size));
+                    }
+
+                    sv = string_view((char*)eabuf.data(), (size_t)att.Form.Nonresident.FileSize);
+                } else
+                    sv = res_data;
+
+                do {
+                    auto& ead = *(ea_data*)sv.data();
+
+                    if (sv.length() < offsetof(ea_data, EaName)) {
+                        add_warning("truncated EA ({} bytes, expected at least {})", sv.length(), offsetof(ea_data, EaName));
+                        break;
+                    }
+
+                    if (ead.NextEntryOffset > sv.length()) {
+                        add_warning("truncated EA ({} > {})", ead.NextEntryOffset, sv.length());
+                        break;
+                    }
+
+                    if (offsetof(ea_data, EaName) + ead.EaNameLength + 1 + ead.EaValueLength > ead.NextEntryOffset) {
+                        add_warning("EA overflow ({} + {} + 1 + {} > {})", offsetof(ea_data, EaName), ead.EaNameLength,
+                                    ead.EaValueLength, ead.NextEntryOffset);
+                        break;
+                    }
+
+                    auto ea_name = string_view(ead.EaName, ead.EaNameLength);
+                    buffer_t ea_value(ead.EaValueLength);
+
+                    memcpy(ea_value.data(), &ead.EaName[ead.EaNameLength + 1], ea_value.size());
+
+                    eas.emplace(ea_name, move(ea_value));
+
+                    sv = sv.substr(ead.NextEntryOffset);
+                } while (!sv.empty());
 
                 break;
             }
@@ -2279,6 +2289,156 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
 
     if (links.empty())
         return; // don't create orphaned inodes
+
+    // FIXME - form user.EA xattr from EAs we don't recognize
+
+    memset(&ii, 0, sizeof(INODE_ITEM));
+
+    optional<uint32_t> mode;
+    enum btrfs_inode_type item_type = btrfs_inode_type::unknown;
+    bool has_lxattrb = false;
+
+    auto set_mode = [&](uint32_t& m) {
+        if (is_dir && !__S_ISTYPE(m, __S_IFDIR)) {
+            add_warning("st_mode did not have S_IFDIR set, setting.");
+            m &= ~__S_IFMT;
+            m |= __S_IFDIR;
+        } else if (!is_dir && __S_ISTYPE(m, __S_IFDIR)) {
+            add_warning("st_mode had S_IFDIR set, clearing.");
+            m &= ~__S_IFMT;
+            m |= __S_IFREG;
+        }
+
+        switch (m & __S_IFMT) {
+            case __S_IFREG:
+                item_type = btrfs_inode_type::file;
+                break;
+
+            case __S_IFDIR:
+                item_type = btrfs_inode_type::directory;
+                break;
+
+            case __S_IFCHR:
+                item_type = btrfs_inode_type::chardev;
+                break;
+
+            case __S_IFBLK:
+                item_type = btrfs_inode_type::blockdev;
+                break;
+
+            case __S_IFIFO:
+                item_type = btrfs_inode_type::fifo;
+                break;
+
+            case __S_IFSOCK:
+                item_type = btrfs_inode_type::socket;
+                break;
+
+            case __S_IFLNK:
+                item_type = btrfs_inode_type::symlink;
+                break;
+
+            default:
+                add_warning("Unrecognized inode type {:o}.", m & __S_IFMT);
+        }
+    };
+
+    for (const auto& ea : eas) {
+        const auto& n = ea.first;
+        const auto& v = ea.second;
+
+        if (n == "$LXUID") {
+            if (v.size() != sizeof(uint32_t)) {
+                add_warning("$LXUID EA was {} bytes, expected {}", v.size(), sizeof(uint32_t));
+                continue;
+            }
+
+            ii.st_uid = *(uint32_t*)v.data();
+        } else if (n == "$LXGID") {
+            if (v.size() != sizeof(uint32_t)) {
+                add_warning("$LXGID EA was {} bytes, expected {}", v.size(), sizeof(uint32_t));
+                continue;
+            }
+
+            ii.st_gid = *(uint32_t*)v.data();
+        } else if (n == "$LXMOD") {
+            if (v.size() != sizeof(uint32_t)) {
+                add_warning("$LXMOD EA was {} bytes, expected {}", v.size(), sizeof(uint32_t));
+                continue;
+            }
+
+            mode = *(uint32_t*)v.data();
+
+            set_mode(mode.value());
+        } else if (n == "$LXDEV") {
+            if (v.size() != sizeof(lxdev)) {
+                add_warning("$LXDEV EA was {} bytes, expected {}", v.size(), sizeof(lxdev));
+                continue;
+            }
+
+            const auto& d = *(lxdev*)v.data();
+
+            if (d.minor >= 0x100000) {
+                add_warning("minor value {} is too large for Btrfs", d.minor);
+                continue;
+            }
+
+            ii.st_rdev = (d.major << 20) | (d.minor & 0xfffff);
+        } else if (n == "LXATTRB") {
+            if (v.size() != sizeof(lxattrb)) {
+                add_warning("LXATTRB EA was {} bytes, expected {}", v.size(), sizeof(lxattrb));
+                continue;
+            }
+
+            const auto& l = *(lxattrb*)v.data();
+
+            if (l.format != 0) {
+                add_warning("LXATTRB format was {}, expected 0", l.format);
+                continue;
+            }
+
+            if (l.version != 1) {
+                add_warning("LXATTRB version was {}, expected 1", l.version);
+                continue;
+            }
+
+            mode = l.mode;
+            set_mode(mode.value());
+
+            ii.st_uid = l.uid;
+            ii.st_gid = l.gid;
+            ii.st_rdev = l.rdev;
+            ii.st_atime.seconds = l.atime;
+            ii.st_atime.nanoseconds = l.atime_ns;
+            ii.st_mtime.seconds = l.mtime;
+            ii.st_mtime.nanoseconds = l.mtime_ns;
+            ii.st_ctime.seconds = l.ctime;
+            ii.st_ctime.nanoseconds = l.ctime_ns;
+
+            has_lxattrb = true;
+        } else if (n == "LX.SECURITY.CAPABILITY") {
+            static const string_view lxea = "lxea";
+
+            if (v.size() < lxea.length()) {
+                add_warning("LX.SECURITY.CAPABILITY EA was {} bytes, expected at least {}", v.size(), lxea.length());
+                continue;
+            }
+
+            if (string_view((char*)v.data(), lxea.length()) != lxea) {
+                add_warning("LX.SECURITY.CAPABILITY EA prefix was not \"{}\"", lxea);
+                continue;
+            }
+
+            buffer_t v2(v.size() - lxea.length());
+            memcpy(v2.data(), v.data() + lxea.length(), v2.size());
+
+            xattrs.emplace(EA_CAP, make_pair(EA_CAP_HASH, v2));
+        } else if (n != "$KERNEL.PURGE.APPXFICACHE" && n != "$KERNEL.PURGE.ESBCACHE" && n != "$CI.CATALOGHINT" &&
+                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.DATABASE" && n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.DATABASEEX1" &&
+                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.EPOCHEA" && n != "APPLICENSING") {
+            add_warning("Unrecognized EA {}", ea.first);
+        }
+    }
 
     if (!wof_mappings.empty()) {
         auto len = wof_compressed_data.size();
@@ -2371,8 +2531,6 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
         fmt::print(stderr, "{}\n", w);
     }
 
-    memset(&ii, 0, sizeof(INODE_ITEM));
-
     const auto& si = *(const STANDARD_INFORMATION*)standard_info.data();
 
     if (standard_info.size() >= offsetof(STANDARD_INFORMATION, MaximumVersions)) {
@@ -2402,9 +2560,12 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
 
     if (standard_info.size() >= offsetof(STANDARD_INFORMATION, OwnerId)) {
         ii.otime = win_time_to_unix(si.CreationTime);
-        ii.st_atime = win_time_to_unix(si.LastAccessTime);
-        ii.st_mtime = win_time_to_unix(si.LastWriteTime);
-        ii.st_ctime = win_time_to_unix(si.ChangeTime);
+
+        if (!has_lxattrb) {
+            ii.st_atime = win_time_to_unix(si.LastAccessTime);
+            ii.st_mtime = win_time_to_unix(si.LastWriteTime);
+            ii.st_ctime = win_time_to_unix(si.ChangeTime);
+        }
     }
 
     if (sd.empty() && standard_info.size() >= offsetof(STANDARD_INFORMATION, QuotaCharged)) {
@@ -2519,21 +2680,22 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
 
     ii.st_nlink = (uint32_t)links.size();
 
-    if (is_dir)
-        ii.st_mode = __S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
-    else
-        ii.st_mode = __S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    if (mode.has_value())
+        ii.st_mode = mode.value();
+    else {
+        if (is_dir)
+            ii.st_mode = __S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
+        else
+            ii.st_mode = __S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
-    if (!symlink.empty())
-        ii.st_mode |= __S_IFLNK;
+        if (!symlink.empty())
+            ii.st_mode |= __S_IFLNK;
+    }
 
     ii.sequence = 1;
 
     if (nocsum && !is_dir)
         ii.flags = BTRFS_INODE_NODATACOW | BTRFS_INODE_NODATASUM;
-
-    // FIXME - xattrs (EAs, etc.)
-    // FIXME - LXSS
 
     if (!mappings.empty()) {
         buffer_t buf(offsetof(EXTENT_DATA, data[0]) + sizeof(EXTENT_DATA2));
@@ -2767,22 +2929,20 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
 
     add_item(r, inode, TYPE_INODE_ITEM, 0, &ii, sizeof(INODE_ITEM));
 
-    {
-        uint8_t type;
-
+    if (item_type == btrfs_inode_type::unknown) {
         if (is_dir)
-            type = BTRFS_TYPE_DIRECTORY;
+            item_type = btrfs_inode_type::directory;
         else if (!symlink.empty())
-            type = BTRFS_TYPE_SYMLINK;
+            item_type = btrfs_inode_type::symlink;
         else
-            type = BTRFS_TYPE_FILE;
+            item_type = btrfs_inode_type::file;
+    }
 
-        for (const auto& l : links) {
-            if (get<0>(l) == NTFS_ROOT_DIR_INODE)
-                link_inode(r, inode, SUBVOL_ROOT_INODE, get<1>(l), type);
-            else
-                link_inode(r, inode, get<0>(l) + inode_offset, get<1>(l), type);
-        }
+    for (const auto& l : links) {
+        if (get<0>(l) == NTFS_ROOT_DIR_INODE)
+            link_inode(r, inode, SUBVOL_ROOT_INODE, get<1>(l), item_type);
+        else
+            link_inode(r, inode, get<0>(l) + inode_offset, get<1>(l), item_type);
     }
 
     if (!sd.empty()) {
@@ -3279,7 +3439,7 @@ static void populate_root_root(root& root_root) {
     di.transid = 0;
     di.m = 0;
     di.n = sizeof(default_subvol) - 1;
-    di.type = BTRFS_TYPE_DIRECTORY;
+    di.type = btrfs_inode_type::directory;
     memcpy(di.name, default_subvol, sizeof(default_subvol) - 1);
 
     add_item_move(root_root, BTRFS_ROOT_TREEDIR, TYPE_DIR_ITEM, default_hash, buf);
@@ -3373,9 +3533,12 @@ static void convert(ntfs& dev, enum btrfs_compression compression, enum btrfs_cs
     while (!runs.empty() && (runs.rbegin()->second.back().offset * cluster_size) + runs.rbegin()->second.back().length > device_size) {
         auto& r = runs.rbegin()->second;
 
-        if (r.back().offset * cluster_size >= orig_device_size)
+        if (r.back().offset * cluster_size >= orig_device_size) {
             r.pop_back();
-        else {
+
+            if (r.empty())
+                runs.erase(prev(runs.end()));
+        } else {
             uint64_t len = orig_device_size - (r.back().offset * cluster_size);
 
             if (len % cluster_size)

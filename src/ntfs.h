@@ -85,6 +85,75 @@ enum class ntfs_attribute : uint32_t {
     EA_INFORMATION = 0xD0,
     EA = 0xE0,
     PROPERTY_SET = 0xF0,
+    LOGGED_UTILITY_STREAM = 0x100,
+};
+
+template<>
+struct fmt::formatter<enum ntfs_attribute> {
+    constexpr auto parse(format_parse_context& ctx) {
+        auto it = ctx.begin();
+
+        if (it != ctx.end() && *it != '}')
+            throw format_error("invalid format");
+
+        return it;
+    }
+
+    template<typename format_context>
+    auto format(enum ntfs_attribute att, format_context& ctx) const {
+        switch (att) {
+            case ntfs_attribute::STANDARD_INFORMATION:
+                return fmt::format_to(ctx.out(), "STANDARD_INFORMATION");
+
+            case ntfs_attribute::ATTRIBUTE_LIST:
+                return fmt::format_to(ctx.out(), "ATTRIBUTE_LIST");
+
+            case ntfs_attribute::FILE_NAME:
+                return fmt::format_to(ctx.out(), "FILE_NAME");
+
+            case ntfs_attribute::VOLUME_VERSION:
+                return fmt::format_to(ctx.out(), "VOLUME_VERSION");
+
+            case ntfs_attribute::SECURITY_DESCRIPTOR:
+                return fmt::format_to(ctx.out(), "SECURITY_DESCRIPTOR");
+
+            case ntfs_attribute::VOLUME_NAME:
+                return fmt::format_to(ctx.out(), "VOLUME_NAME");
+
+            case ntfs_attribute::VOLUME_INFORMATION:
+                return fmt::format_to(ctx.out(), "VOLUME_INFORMATION");
+
+            case ntfs_attribute::DATA:
+                return fmt::format_to(ctx.out(), "DATA");
+
+            case ntfs_attribute::INDEX_ROOT:
+                return fmt::format_to(ctx.out(), "INDEX_ROOT");
+
+            case ntfs_attribute::INDEX_ALLOCATION:
+                return fmt::format_to(ctx.out(), "INDEX_ALLOCATION");
+
+            case ntfs_attribute::BITMAP:
+                return fmt::format_to(ctx.out(), "BITMAP");
+
+            case ntfs_attribute::SYMBOLIC_LINK:
+                return fmt::format_to(ctx.out(), "SYMBOLIC_LINK");
+
+            case ntfs_attribute::EA_INFORMATION:
+                return fmt::format_to(ctx.out(), "EA_INFORMATION");
+
+            case ntfs_attribute::EA:
+                return fmt::format_to(ctx.out(), "EA");
+
+            case ntfs_attribute::PROPERTY_SET:
+                return fmt::format_to(ctx.out(), "PROPERTY_SET");
+
+            case ntfs_attribute::LOGGED_UTILITY_STREAM:
+                return fmt::format_to(ctx.out(), "LOGGED_UTILITY_STREAM");
+
+            default:
+                return fmt::format_to(ctx.out(), "{:x}", (uint32_t)att);
+        }
+    }
 };
 
 typedef struct _ATTRIBUTE_RECORD_HEADER {
@@ -380,6 +449,38 @@ typedef struct {
     uint32_t Version;
     uint32_t Algorithm;
 } file_provider_external_info_v0; // FILE_PROVIDER_EXTERNAL_INFO_V0 in winioctl.h
+
+// cf. https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_file_full_ea_information
+
+typedef struct {
+    uint32_t NextEntryOffset;
+    uint8_t Flags;
+    uint8_t EaNameLength;
+    uint16_t EaValueLength;
+    char EaName[1];
+} ea_data;
+
+typedef struct {
+    uint32_t major;
+    uint32_t minor;
+} lxdev;
+
+// https://dfir.ru/2019/01/19/ntfs-today/
+
+typedef struct {
+    uint16_t format;
+    uint16_t version;
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t rdev;
+    uint32_t atime_ns;
+    uint32_t mtime_ns;
+    uint32_t ctime_ns;
+    uint64_t atime;
+    uint64_t mtime;
+    uint64_t ctime;
+} lxattrb;
 
 #pragma pack(pop)
 

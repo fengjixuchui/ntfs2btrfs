@@ -57,6 +57,10 @@ endif()
 
 add_executable(ntfs2btrfs ${SRC_FILES})
 
+if(CMAKE_BUILD_TYPE MATCHES "Debug")
+    add_definitions(-D_GLIBCXX_DEBUG)
+endif()
+
 target_link_libraries(ntfs2btrfs fmt::fmt-header-only)
 
 if(WITH_ZLIB)
@@ -85,5 +89,5 @@ else()
     target_compile_options(ntfs2btrfs PRIVATE -Wall -Wextra -Wno-address-of-packed-member -Wconversion -Wno-unknown-pragmas -Werror=pointer-arith)
 endif()
 
-install(TARGETS ntfs2btrfs DESTINATION sbin)
+install(TARGETS ntfs2btrfs DESTINATION ${CMAKE_INSTALL_SBINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ntfs2btrfs.8 DESTINATION ${CMAKE_INSTALL_MANDIR}/man8)
