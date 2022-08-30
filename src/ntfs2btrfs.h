@@ -33,6 +33,7 @@
 #pragma warning(push)
 #pragma warning(disable : 26495 26451 26437 26812)
 #include <fmt/format.h>
+#include <fmt/compile.h>
 #pragma warning(pop)
 
 #ifdef _MSC_VER
@@ -48,7 +49,7 @@
 #ifdef _WIN32
 class last_error : public std::exception {
 public:
-    last_error(const std::string_view& function, int le) {
+    last_error(std::string_view function, int le) {
         std::string nice_msg;
 
         {
@@ -99,10 +100,10 @@ public:
 typedef std::unique_ptr<HANDLE, handle_closer> unique_handle;
 #endif
 
-class formatted_error : public std::exception {
+class _formatted_error : public std::exception {
 public:
     template<typename T, typename... Args>
-    formatted_error(const T& s, Args&&... args) {
+    _formatted_error(const T& s, Args&&... args) {
         msg = fmt::format(s, std::forward<Args>(args)...);
     }
 
@@ -113,6 +114,8 @@ public:
 private:
     std::string msg;
 };
+
+#define formatted_error(s, ...) _formatted_error(FMT_COMPILE(s), ##__VA_ARGS__)
 
 struct space {
     space(uint64_t offset, uint64_t length) : offset(offset), length(length) { }
@@ -198,7 +201,7 @@ public:
 
     uint64_t id;
     std::map<KEY, buffer_t> items;
-    std::vector<buffer_t> trees;
+    std::list<buffer_t> trees;
     uint64_t tree_addr;
     uint8_t level;
     uint64_t metadata_size = 0;
@@ -318,18 +321,18 @@ static const char image_filename[] = "ntfs.img";
 
 // decomp.cpp
 buffer_t lznt1_decompress(std::string_view compdata, uint32_t size);
-buffer_t do_lzx_decompress(const std::string_view& compdata, uint32_t size);
-buffer_t do_xpress_decompress(const std::string_view& compdata, uint32_t size, uint32_t chunk_size);
+buffer_t do_lzx_decompress(std::string_view compdata, uint32_t size);
+buffer_t do_xpress_decompress(std::string_view compdata, uint32_t size, uint32_t chunk_size);
 
 // compress.cpp
 #ifdef WITH_ZLIB
-std::optional<buffer_t> zlib_compress(const std::string_view& data, uint32_t cluster_size);
+std::optional<buffer_t> zlib_compress(std::string_view data, uint32_t cluster_size);
 #endif
 #ifdef WITH_LZO
-std::optional<buffer_t> lzo_compress(const std::string_view& data, uint32_t cluster_size);
+std::optional<buffer_t> lzo_compress(std::string_view data, uint32_t cluster_size);
 #endif
 #ifdef WITH_ZSTD
-std::optional<buffer_t> zstd_compress(const std::string_view& data, uint32_t cluster_size);
+std::optional<buffer_t> zstd_compress(std::string_view data, uint32_t cluster_size);
 #endif
 
 // sha256.c
@@ -340,3 +343,6 @@ extern "C" void blake2b(void *out, size_t outlen, const void* in, size_t inlen);
 
 // rollback.cpp
 void rollback(const std::string& fn);
+
+// ntfs2btrfs.cpp
+std::string utf16_to_utf8(std::u16string_view sv);

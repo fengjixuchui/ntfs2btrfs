@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.14.3)
 cmake_policy(SET CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(ntfs2btrfs VERSION 20210923)
+project(ntfs2btrfs VERSION 20220812)
 
 include(GNUInstallDirs)
 
@@ -14,7 +14,7 @@ option(WITH_ZSTD "Include zstd support" ON)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/config.h.in ${CMAKE_CURRENT_BINARY_DIR}/config.h)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/ntfs2btrfs.8.in ${CMAKE_CURRENT_BINARY_DIR}/ntfs2btrfs.8)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(fmt REQUIRED)

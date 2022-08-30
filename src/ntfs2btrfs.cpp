@@ -15,8 +15,6 @@
  * You should have received a copy of the GNU General Public Licence
  * along with Ntfs2btrfs. If not, see <https://www.gnu.org/licenses/>. */
 
-#define _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
-
 #include "ntfs.h"
 #include "ntfs2btrfs.h"
 #include "crc32c.h"
@@ -35,7 +33,7 @@
 #include <chrono>
 #include <random>
 #include <locale>
-#include <codecvt>
+#include <span>
 #include <optional>
 
 #ifdef _WIN32
@@ -48,17 +46,18 @@
 
 using namespace std;
 
-list<chunk> chunks;
-list<root> roots;
-uint32_t tree_size = 0x4000; // FIXME
-list<space> space_list;
-bool chunks_changed;
-uint64_t data_size = 0;
-BTRFS_UUID fs_uuid, chunk_uuid, dev_uuid, subvol_uuid;
-list<relocation> relocs;
-uint64_t device_size, orig_device_size;
-bool reloc_last_sector = false;
-uint64_t mapped_inodes = 0, rewritten_inodes = 0, inline_inodes = 0;
+static list<chunk> chunks;
+static list<root> roots;
+static uint32_t tree_size = 0x4000; // FIXME
+static list<space> space_list;
+static bool chunks_changed;
+static uint64_t data_size = 0;
+static BTRFS_UUID fs_uuid, chunk_uuid, dev_uuid, subvol_uuid;
+static list<relocation> relocs;
+static uint64_t device_size, orig_device_size;
+static bool reloc_last_sector = false;
+static uint64_t mapped_inodes = 0, rewritten_inodes = 0, inline_inodes = 0;
+static uint64_t last_chunk_end;
 
 static const uint64_t stripe_length = 0x10000;
 static const uint64_t chunk_virt_offset = 0x100000;
@@ -74,7 +73,7 @@ static const uint16_t max_inline = 2048;
 static const uint64_t max_extent_size = 0x8000000; // 128 MB
 static const uint64_t max_comp_extent_size = 0x20000; // 128 KB
 
-static const char chunk_error_message[] = "Could not find enough space to create new chunk. Try clearing a few gigabytes of space, or defragging.";
+static constexpr char chunk_error_message[] = "Could not find enough space to create new chunk. Try clearing a few gigabytes of space, or defragging.";
 
 #define EA_NTACL "security.NTACL"
 #define EA_NTACL_HASH 0x45922146
@@ -89,6 +88,181 @@ static const char chunk_error_message[] = "Could not find enough space to create
 #define EA_CAP_HASH 0x7c3650b1
 
 using runs_t = map<uint64_t, list<data_alloc>>;
+
+static constexpr size_t utf16_to_utf8_len(u16string_view sv) noexcept {
+    size_t ret = 0;
+
+    while (!sv.empty()) {
+        if (sv[0] < 0x80)
+            ret++;
+        else if (sv[0] < 0x800)
+            ret += 2;
+        else if (sv[0] < 0xd800)
+            ret += 3;
+        else if (sv[0] < 0xdc00) {
+            if (sv.length() < 2 || (sv[1] & 0xdc00) != 0xdc00) {
+                ret += 3;
+                sv = sv.substr(1);
+                continue;
+            }
+
+            ret += 4;
+            sv = sv.substr(1);
+        } else
+            ret += 3;
+
+        sv = sv.substr(1);
+    }
+
+    return ret;
+}
+
+static constexpr void utf16_to_utf8_span(u16string_view sv, span<char> t) noexcept {
+    auto ptr = t.begin();
+
+    if (ptr == t.end())
+        return;
+
+    while (!sv.empty()) {
+        if (sv[0] < 0x80) {
+            *ptr = (uint8_t)sv[0];
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+        } else if (sv[0] < 0x800) {
+            *ptr = (uint8_t)(0xc0 | (sv[0] >> 6));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)(0x80 | (sv[0] & 0x3f));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+        } else if (sv[0] < 0xd800) {
+            *ptr = (uint8_t)(0xe0 | (sv[0] >> 12));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)(0x80 | ((sv[0] >> 6) & 0x3f));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)(0x80 | (sv[0] & 0x3f));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+        } else if (sv[0] < 0xdc00) {
+            if (sv.length() < 2 || (sv[1] & 0xdc00) != 0xdc00) {
+                *ptr = (uint8_t)0xef;
+                ptr++;
+
+                if (ptr == t.end())
+                    return;
+
+                *ptr = (uint8_t)0xbf;
+                ptr++;
+
+                if (ptr == t.end())
+                    return;
+
+                *ptr = (uint8_t)0xbd;
+                ptr++;
+
+                if (ptr == t.end())
+                    return;
+
+                sv = sv.substr(1);
+                continue;
+            }
+
+            char32_t cp = 0x10000 | ((sv[0] & ~0xd800) << 10) | (sv[1] & ~0xdc00);
+
+            *ptr = (uint8_t)(0xf0 | (cp >> 18));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)(0x80 | ((cp >> 12) & 0x3f));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)(0x80 | ((cp >> 6) & 0x3f));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)(0x80 | (cp & 0x3f));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            sv = sv.substr(1);
+        } else if (sv[0] < 0xe000) {
+            *ptr = (uint8_t)0xef;
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)0xbf;
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)0xbd;
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+        } else {
+            *ptr = (uint8_t)(0xe0 | (sv[0] >> 12));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)(0x80 | ((sv[0] >> 6) & 0x3f));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+
+            *ptr = (uint8_t)(0x80 | (sv[0] & 0x3f));
+            ptr++;
+
+            if (ptr == t.end())
+                return;
+        }
+
+        sv = sv.substr(1);
+    }
+}
+
+string utf16_to_utf8(u16string_view sv) {
+    if (sv.empty())
+        return "";
+
+    string ret(utf16_to_utf8_len(sv), 0);
+
+    utf16_to_utf8_span(sv, ret);
+
+    return ret;
+}
 
 static void space_list_remove(list<space>& space_list, uint64_t offset, uint64_t length) {
     auto it = space_list.begin();
@@ -273,6 +447,8 @@ static void create_data_chunks(ntfs& dev, const buffer_t& bmpdata) {
         addr += data_chunk_size;
         bdsv = bdsv.substr(len);
     }
+
+    last_chunk_end = chunks.back().offset - chunk_virt_offset + chunks.back().length;
 }
 
 static void add_item(root& r, uint64_t obj_id, uint8_t obj_type, uint64_t offset, const buffer_t& buf) {
@@ -756,9 +932,7 @@ static void set_volume_label(superblock& sb, ntfs& dev) {
         if (vnw.empty())
             return;
 
-        wstring_convert<codecvt_utf8_utf16<char16_t>, char16_t> convert;
-
-        auto vn = convert.to_bytes((char16_t*)vnw.data(), (char16_t*)&vnw[vnw.size()]);
+        auto vn = utf16_to_utf8(u16string_view((char16_t*)vnw.data(), vnw.size()));
 
         if (vn.length() > MAX_LABEL_SIZE) {
             vn = vn.substr(0, MAX_LABEL_SIZE);
@@ -1029,7 +1203,7 @@ static void update_extent_root(root& extent_root, enum btrfs_csum_type csum_type
     }
 }
 
-static void add_inode_ref(root& r, uint64_t inode, uint64_t parent, uint64_t index, const string_view& name) {
+static void add_inode_ref(root& r, uint64_t inode, uint64_t parent, uint64_t index, string_view name) {
     if (r.items.count(KEY{inode, TYPE_INODE_REF, parent}) != 0) { // collision, append to the end
         auto& old = r.items.at(KEY{inode, TYPE_INODE_REF, parent});
 
@@ -1499,7 +1673,7 @@ static BTRFS_TIME win_time_to_unix(int64_t time) {
     return bt;
 }
 
-static void link_inode(root& r, uint64_t inode, uint64_t dir, const string_view& name,
+static void link_inode(root& r, uint64_t inode, uint64_t dir, string_view name,
                        enum btrfs_inode_type type) {
     uint64_t seq;
 
@@ -1799,7 +1973,7 @@ static void process_mappings(const ntfs& dev, uint64_t inode, list<mapping>& map
     }
 }
 
-static void set_xattr(root& r, uint64_t inode, const string_view& name, uint32_t hash, const buffer_t& data) {
+static void set_xattr(root& r, uint64_t inode, string_view name, uint32_t hash, const buffer_t& data) {
     buffer_t buf(offsetof(DIR_ITEM, name[0]) + name.size() + data.size());
     auto& di = *(DIR_ITEM*)buf.data();
 
@@ -1839,7 +2013,7 @@ static void clear_line() {
 #endif
 }
 
-static bool string_eq_ci(const string_view& s1, const string_view& s2) {
+static bool string_eq_ci(string_view s1, string_view s2) {
     if (s1.length() != s2.length())
         return false;
 
@@ -1901,7 +2075,6 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
     INODE_ITEM ii;
     uint64_t file_size = 0;
     list<mapping> mappings, wof_mappings;
-    wstring_convert<codecvt_utf8_utf16<char16_t>, char16_t> convert;
     vector<tuple<uint64_t, string>> links;
     buffer_t standard_info, sd, reparse_point, inline_data;
     string symlink;
@@ -1926,14 +2099,14 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
 
     is_dir = f.is_directory();
 
-    auto add_warning = [&]<typename... Args>(const string_view& msg, Args&&... args) {
+    auto add_warning = [&]<typename... Args>(fmt::format_string<Args...> s, Args&&... args) {
         if (filename.empty())
             filename = f.get_filename();
 
-        warnings.emplace_back(filename + ": " + fmt::format(msg, std::forward<Args>(args)...));
+        warnings.emplace_back(filename + ": " + fmt::format(s, forward<Args>(args)...));
     };
 
-    f.loop_through_atts([&](const ATTRIBUTE_RECORD_HEADER& att, const string_view& res_data, const u16string_view& name) -> bool {
+    f.loop_through_atts([&](const ATTRIBUTE_RECORD_HEADER& att, string_view res_data, u16string_view name) -> bool {
         switch (att.TypeCode) {
             case ntfs_attribute::STANDARD_INFORMATION:
                 if (att.FormCode == NTFS_ATTRIBUTE_FORM::NONRESIDENT_FORM)
@@ -1991,7 +2164,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                 } else { // ADS
                     static const char xattr_prefix[] = "user.";
 
-                    auto ads_name = convert.to_bytes(name.data(), name.data() + name.length());
+                    auto ads_name = utf16_to_utf8(name);
                     auto max_xattr_size = (uint32_t)(tree_size - sizeof(tree_header) - sizeof(leaf_node) - offsetof(DIR_ITEM, name[0]) - ads_name.length() - (sizeof(xattr_prefix) - 1));
 
                     // FIXME - check xattr_name not reserved
@@ -2087,7 +2260,7 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                     if (att.Form.Resident.ValueLength < offsetof(FILE_NAME, FileName[0]) + (fn->FileNameLength * sizeof(char16_t)))
                         throw formatted_error("FILE_NAME was truncated");
 
-                    auto name2 = convert.to_bytes(fn->FileName, fn->FileName + fn->FileNameLength);
+                    auto name2 = utf16_to_utf8(u16string_view((char16_t*)fn->FileName, fn->FileNameLength));
 
                     if (name2.length() > 255) {
                         // FIXME - make sure no collision with existing file
@@ -2157,8 +2330,9 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                                             rpb.SymbolicLinkReparseBuffer.PrintNameLength)) {
                             add_warning("Symlink reparse point buffer was truncated.");
                         } else if (rpb.SymbolicLinkReparseBuffer.Flags & SYMLINK_FLAG_RELATIVE) {
-                            symlink = convert.to_bytes(&rpb.SymbolicLinkReparseBuffer.PathBuffer[rpb.SymbolicLinkReparseBuffer.PrintNameOffset / sizeof(char16_t)],
-                                                       &rpb.SymbolicLinkReparseBuffer.PathBuffer[(rpb.SymbolicLinkReparseBuffer.PrintNameOffset + rpb.SymbolicLinkReparseBuffer.PrintNameLength) / sizeof(char16_t)]);
+                            u16string_view sv(&rpb.SymbolicLinkReparseBuffer.PathBuffer[rpb.SymbolicLinkReparseBuffer.PrintNameOffset / sizeof(char16_t)],
+                                              rpb.SymbolicLinkReparseBuffer.PrintNameLength / sizeof(char16_t));
+                            symlink = utf16_to_utf8(sv);
 
                             for (auto& c : symlink) {
                                 if (c == '\\')
@@ -2435,7 +2609,9 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
             xattrs.emplace(EA_CAP, make_pair(EA_CAP_HASH, v2));
         } else if (n != "$KERNEL.PURGE.APPXFICACHE" && n != "$KERNEL.PURGE.ESBCACHE" && n != "$CI.CATALOGHINT" &&
                    n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.DATABASE" && n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.DATABASEEX1" &&
-                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.EPOCHEA" && n != "APPLICENSING") {
+                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.EPOCHEA" && n != "APPLICENSING" &&
+                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMON" && n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMONEX" &&
+                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMONEX_1" && n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.USER") {
             add_warning("Unrecognized EA {}", ea.first);
         }
     }
@@ -2530,6 +2706,8 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
     for (const auto& w : warnings) {
         fmt::print(stderr, "{}\n", w);
     }
+
+#undef add_warning
 
     const auto& si = *(const STANDARD_INFORMATION*)standard_info.data();
 
@@ -3377,6 +3555,18 @@ static void protect_superblocks(ntfs& dev, runs_t& runs) {
 
     if (reloc_last_sector)
         protect_cluster(dev, runs, device_size / cluster_size);
+
+    if (last_chunk_end < device_size) {
+        uint64_t cluster_start = last_chunk_end / cluster_size;
+        uint64_t cluster_end = device_size / cluster_size;
+
+        if (reloc_last_sector)
+            cluster_end--;
+
+        for (auto i = cluster_start; i <= cluster_end; i++) {
+            protect_cluster(dev, runs, i);
+        }
+    }
 }
 
 static void clear_first_cluster(ntfs& dev) {
@@ -3662,7 +3852,7 @@ static void check_cpu() noexcept {
 }
 #endif
 
-static enum btrfs_compression parse_compression_type(const string_view& s) {
+static enum btrfs_compression parse_compression_type(string_view s) {
     if (s == "none")
         return btrfs_compression::none;
     else if (s == "zlib")
@@ -3675,7 +3865,7 @@ static enum btrfs_compression parse_compression_type(const string_view& s) {
         throw formatted_error("Unrecognized compression type {}.", s);
 }
 
-static enum btrfs_csum_type parse_csum_type(const string_view& s) {
+static enum btrfs_csum_type parse_csum_type(string_view s) {
     if (s == "crc32c")
         return btrfs_csum_type::crc32c;
     else if (s == "xxhash")
@@ -3785,37 +3975,42 @@ Convert an NTFS filesystem to Btrfs.
             return 0;
         }
 
+        if (nocsum && compression != btrfs_compression::none) {
+            compression = btrfs_compression::none;
+            fmt::print("Disabling compression as it requires checksums to be enabled.\n");
+        } else {
 #ifndef WITH_ZLIB
-        if (compression == btrfs_compression::zlib)
-            throw runtime_error("Zlib compression not compiled in.");
+            if (compression == btrfs_compression::zlib)
+                throw runtime_error("Zlib compression not compiled in.");
 #endif
 
 #ifndef WITH_LZO
-        if (compression == btrfs_compression::lzo)
-            throw runtime_error("LZO compression not compiled in.");
+            if (compression == btrfs_compression::lzo)
+                throw runtime_error("LZO compression not compiled in.");
 #endif
 
 #ifndef WITH_ZSTD
-        if (compression == btrfs_compression::zstd)
-            throw runtime_error("Zstd compression not compiled in.");
+            if (compression == btrfs_compression::zstd)
+                throw runtime_error("Zstd compression not compiled in.");
 #endif
 
-        switch (compression) {
-            case btrfs_compression::zlib:
-                fmt::print("Using Zlib compression.\n");
-                break;
+            switch (compression) {
+                case btrfs_compression::zlib:
+                    fmt::print("Using Zlib compression.\n");
+                    break;
 
-            case btrfs_compression::lzo:
-                fmt::print("Using LZO compression.\n");
-                break;
+                case btrfs_compression::lzo:
+                    fmt::print("Using LZO compression.\n");
+                    break;
 
-            case btrfs_compression::zstd:
-                fmt::print("Using Zstd compression.\n");
-                break;
+                case btrfs_compression::zstd:
+                    fmt::print("Using Zstd compression.\n");
+                    break;
 
-            case btrfs_compression::none:
-                fmt::print("Not using compression.\n");
-                break;
+                case btrfs_compression::none:
+                    fmt::print("Not using compression.\n");
+                    break;
+            }
         }
 
         switch (csum_type) {

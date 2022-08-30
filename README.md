@@ -34,19 +34,28 @@ Installation
 ------------
 
 On Windows, go to the [Releases page](https://github.com/maharmstone/ntfs2btrfs/releases) and
-download the latest Zip file.
+download the latest Zip file, or use [Scoop](https://github.com/ScoopInstaller/Main/blob/master/bucket/ntfs2btrfs.json).
 
 For Linux:
 * [Arch](https://aur.archlinux.org/packages/ntfs2btrfs-git) (thanks to [nicman23](https://github.com/nicman23))
 * [Fedora](https://src.fedoraproject.org/rpms/ntfs2btrfs) (thanks to [Conan-Kudo](https://github.com/Conan-Kudo))
-* [Gentoo ebuild](https://raw.githubusercontent.com/maharmstone/ntfs2btrfs/master/ntfs2btrfs-20210923.ebuild)
-* [Debian & Ubuntu](https://sid.ethz.ch/debian/ntfs2btrfs/) (thanks to [alexmyczko](https://github.com/alexmyczko))
+* [Gentoo ebuild](https://raw.githubusercontent.com/maharmstone/ntfs2btrfs/master/ntfs2btrfs-20220812.ebuild)
+* [Debian](https://packages.debian.org/ntfs2btrfs) (thanks to [alexmyczko](https://github.com/alexmyczko))
+* [Ubuntu](https://packages.ubuntu.com/ntfs2btrfs) (thanks to [alexmyczko](https://github.com/alexmyczko))
+* [openSUSE](https://build.opensuse.org/package/show/filesystems/ntfs2btrfs) (thanks to David Sterba)
 
 For other distributions or operating systems, you will need to compile it yourself - see
 below.
 
 Changelog
 ---------
+
+* 20220812
+  * Added --no-datasum option, to skip calculating checksums
+  * LXSS / WSL metadata is now preserved
+  * Fixed lowercase drive letters not being recognized
+  * Fixed crash due to iterator invalidation (thanks to nyanpasu64)
+  * Fixed corruption when NTFS places file in last megabyte of disk
 
 * 20210923
   * Added (Btrfs) compression support (zlib, lzo, and zstd)
@@ -107,13 +116,13 @@ What works
 * Alternate data streams
 * DOS attributes (hidden, system, etc.)
 * Rollback to original NTFS image
+* Preservation of LXSS metadata
 
 What doesn't work
 -----------------
 
 * Windows' old extended attributes (you're not using these)
 * Large (i.e >16KB) ADSes (you're not using these either)
-* Preservation of LXSS metadata
 * Preservation of the case-sensitivity flag
 * Unusual cluster sizes (i.e. not 4 KB)
 * Encrypted files
