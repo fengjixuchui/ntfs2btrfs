@@ -81,7 +81,7 @@ enum class ntfs_attribute : uint32_t {
     INDEX_ROOT = 0x90,
     INDEX_ALLOCATION = 0xA0,
     BITMAP = 0xB0,
-    SYMBOLIC_LINK = 0xC0,
+    REPARSE_POINT = 0xC0,
     EA_INFORMATION = 0xD0,
     EA = 0xE0,
     PROPERTY_SET = 0xF0,
@@ -135,8 +135,8 @@ struct fmt::formatter<enum ntfs_attribute> {
             case ntfs_attribute::BITMAP:
                 return fmt::format_to(ctx.out(), "BITMAP");
 
-            case ntfs_attribute::SYMBOLIC_LINK:
-                return fmt::format_to(ctx.out(), "SYMBOLIC_LINK");
+            case ntfs_attribute::REPARSE_POINT:
+                return fmt::format_to(ctx.out(), "REPARSE_POINT");
 
             case ntfs_attribute::EA_INFORMATION:
                 return fmt::format_to(ctx.out(), "EA_INFORMATION");
@@ -551,4 +551,3 @@ public:
 void read_nonresident_mappings(const ATTRIBUTE_RECORD_HEADER& att, std::list<mapping>& mappings,
                                uint32_t cluster_size, uint64_t vdl);
 void populate_skip_list(ntfs& dev, uint64_t inode, std::list<uint64_t>& skiplist);
-void process_fixups(MULTI_SECTOR_HEADER* header, uint64_t length, unsigned int sector_size);

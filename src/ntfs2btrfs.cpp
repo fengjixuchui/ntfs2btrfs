@@ -2300,12 +2300,25 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
                 break;
             }
 
-            case ntfs_attribute::SYMBOLIC_LINK: {
-                if (att.FormCode == NTFS_ATTRIBUTE_FORM::NONRESIDENT_FORM)
-                    throw formatted_error("Error - SYMBOLIC_LINK is non-resident"); // FIXME - can this happen?
+            case ntfs_attribute::REPARSE_POINT: {
+                if (att.FormCode == NTFS_ATTRIBUTE_FORM::RESIDENT_FORM) {
+                    reparse_point.resize(res_data.size());
+                    memcpy(reparse_point.data(), res_data.data(), res_data.size());
+                } else {
+                    list<mapping> rp_mappings;
 
-                reparse_point.resize(res_data.size());
-                memcpy(reparse_point.data(), res_data.data(), res_data.size());
+                    read_nonresident_mappings(att, rp_mappings, cluster_size, att.Form.Nonresident.ValidDataLength);
+
+                    reparse_point.resize((size_t)sector_align(att.Form.Nonresident.FileSize, cluster_size));
+                    memset(reparse_point.data(), 0, reparse_point.size());
+
+                    for (const auto& m : rp_mappings) {
+                        dev.seek(m.lcn * cluster_size);
+                        dev.read(reparse_point.data() + (m.vcn * cluster_size), (size_t)(m.length * cluster_size));
+                    }
+
+                    reparse_point.resize((size_t)att.Form.Nonresident.FileSize);
+                }
 
                 symlink.clear();
 
@@ -2607,12 +2620,37 @@ static void add_inode(root& r, uint64_t inode, uint64_t ntfs_inode, bool& is_dir
             memcpy(v2.data(), v.data() + lxea.length(), v2.size());
 
             xattrs.emplace(EA_CAP, make_pair(EA_CAP_HASH, v2));
-        } else if (n != "$KERNEL.PURGE.APPXFICACHE" && n != "$KERNEL.PURGE.ESBCACHE" && n != "$CI.CATALOGHINT" &&
-                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.DATABASE" && n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.DATABASEEX1" &&
-                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.EPOCHEA" && n != "APPLICENSING" &&
-                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMON" && n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMONEX" &&
-                   n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMONEX_1" && n != "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.USER") {
-            add_warning("Unrecognized EA {}", ea.first);
+        } else {
+            static const string_view recognized_eas[] = {
+                "$KERNEL.PURGE.APPXFICACHE",
+                "$KERNEL.PURGE.ESBCACHE",
+                "$CI.CATALOGHINT",
+                "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.DATABASE",
+                "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.DATABASEEX1",
+                "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.EPOCHEA",
+                "APPLICENSING",
+                "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMON",
+                "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMONEX",
+                "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.COMMONEX_1"
+                "C8A05BC0-3FA8-49E9-8148-61EE14A67687.CSC.USER",
+                "$KERNEL.PURGE.SMARTLOCKER.VALID",
+                "$KERNEL.SMARTLOCKER.ORIGINCLAIM",
+                "$KERNEL.PURGE.APPID.HASHINFO",
+                "$KERNEL.SMARTLOCKER.HASH",
+                "$KERNEL.PURGE.CIPCACHE",
+                "$KERNEL.SMARTLOCKER.UNINSTALLSTRINGS"
+            };
+
+            bool found = false;
+            for (const auto& r : recognized_eas) {
+                if (r == n) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+                add_warning("Unrecognized EA {}", n);
         }
     }
 
